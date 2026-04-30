@@ -6,6 +6,8 @@ import json
 import shutil
 import sys
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,6 +22,7 @@ META_DIR = ROOT / ".sync-meta"
 
 
 def cve_path(cve_id: str) -> Path:
+    # CVE-2019-3494 -> cves/2019/3xxx/CVE-2019-3494.json
     _, year, number = cve_id.split("-")
     bucket = f"{number[:-3]}xxx" if len(number) > 3 else "0xxx"
     return CVES_DIR / year / bucket / f"{cve_id}.json"
@@ -30,10 +33,13 @@ def download(url: str, dest: Path) -> None:
 
     req = urllib.request.Request(
         url,
-        headers={"User-Agent": "nvd-cvelist-sync/1.0"},
+        headers={
+            "User-Agent": "nvd-cvelist-sync/1.0",
+            "Accept": "application/gzip, application/octet-stream, */*",
+        },
     )
 
-    with urllib.request.urlopen(req, timeout=120) as response:
+    with urllib.request.urlopen(req, timeout=180) as response:
         with dest.open("wb") as f:
             shutil.copyfileobj(response, f)
 
@@ -96,20 +102,56 @@ def process_feed(feed: dict, source_url: str) -> tuple[int, int]:
     return total, changed
 
 
-def sync_url(url: str) -> tuple[int, int]:
-    with tempfile.TemporaryDirectory() as tmp:
-        gz_path = Path(tmp) / url.rsplit("/", 1)[-1]
-        download(url, gz_path)
-        feed = load_gzip_json(gz_path)
-        return process_feed(feed, url)
+def sync_url(url: str, max_attempts: int = 5) -> tuple[int, int]:
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                gz_path = Path(tmp) / url.rsplit("/", 1)[-1]
+
+                print(f"Attempt {attempt}/{max_attempts}", flush=True)
+                download(url, gz_path)
+
+                size = gz_path.stat().st_size
+                print(f"Downloaded {size} bytes", flush=True)
+
+                if size == 0:
+                    raise RuntimeError("Downloaded file is empty")
+
+                feed = load_gzip_json(gz_path)
+                return process_feed(feed, url)
+
+        except (
+            EOFError,
+            OSError,
+            TimeoutError,
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            json.JSONDecodeError,
+            RuntimeError,
+        ) as exc:
+            last_error = exc
+            print(f"Download/read failed: {exc}", flush=True)
+
+            if attempt < max_attempts:
+                sleep_seconds = attempt * 10
+                print(f"Retrying in {sleep_seconds}s...", flush=True)
+                time.sleep(sleep_seconds)
+
+    raise RuntimeError(f"Failed after {max_attempts} attempts: {url}") from last_error
 
 
 def sync_full() -> None:
     grand_total = 0
     grand_changed = 0
 
-    for year in range(START_YEAR, CURRENT_YEAR + 1):
+    years = list(range(START_YEAR, CURRENT_YEAR + 1))
+    years.reverse()  # start from newest
+
+    for year in years:
         url = f"{BASE_URL}/nvdcve-2.0-{year}.json.gz"
+
         total, changed = sync_url(url)
 
         grand_total += total
@@ -125,6 +167,7 @@ def sync_full() -> None:
 
 def sync_modified() -> None:
     url = f"{BASE_URL}/nvdcve-2.0-modified.json.gz"
+
     total, changed = sync_url(url)
 
     print(
