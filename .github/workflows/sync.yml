@@ -16,6 +16,8 @@ jobs:
   sync:
     runs-on: ubuntu-latest
 
+    timeout-minutes: 60
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -25,15 +27,20 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Sync NVD yearly feeds
-        run: python scripts/sync_nvd.py
+      - name: Show Python version
+        run: python --version
+
+      - name: Sync NVD yearly feeds (unbuffered logs)
+        run: |
+          echo "Starting sync..."
+          python -u scripts/sync_nvd.py
 
       - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add cves .sync-meta
+          git add cves .sync-meta || true
 
           if git diff --cached --quiet; then
             echo "No changes"
