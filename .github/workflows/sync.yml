@@ -3,7 +3,17 @@ name: Sync NVD CVE feeds
 on:
   schedule:
     - cron: "0 * * * *"
+
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "Sync mode"
+        required: true
+        default: "modified"
+        type: choice
+        options:
+          - modified
+          - full
 
 permissions:
   contents: write
@@ -15,6 +25,7 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
+    timeout-minutes: 90
 
     steps:
       - name: Checkout repository
@@ -25,15 +36,26 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Sync NVD yearly feeds
-        run: python scripts/sync_nvd.py
+      - name: Decide sync mode
+        id: mode
+        run: |
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            echo "mode=modified" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=${{ github.event.inputs.mode }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Sync NVD CVE feeds
+        run: |
+          echo "Running sync mode: ${{ steps.mode.outputs.mode }}"
+          python -u scripts/sync_nvd.py --mode "${{ steps.mode.outputs.mode }}"
 
       - name: Commit changes
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-          git add cves .sync-meta
+          git add cves .sync-meta || true
 
           if git diff --cached --quiet; then
             echo "No changes"
